@@ -14,7 +14,7 @@ Drive herdr — a terminal workspace manager purpose-built to run **more than on
 
 | Property | Value |
 |----------|-------|
-| Binary | `/Users/p0l4k/.local/bin/herdr` (on PATH as `herdr`) |
+| Binary | `/Users/USERNAME/.local/bin/herdr` (on PATH as `herdr`) |
 | Version | `0.6.9` (protocol 13) |
 | Server | running — `herdr status` to confirm |
 | Socket | `~/.config/herdr/herdr.sock` (default session) |
