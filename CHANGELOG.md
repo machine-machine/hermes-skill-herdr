@@ -4,6 +4,41 @@ All notable changes to this skill are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-06-11
+
+The factory loop becomes spec-driven: spec-kit in front, herdr behind.
+
+### Added
+- **scripts/onboard.sh** — onboarding TUI (gum-aware, plain-bash
+  fallback). Choose the orchestrator (**Claude Code**, **Hermes**, or
+  both), verify the substrate (herdr server, jq, git), install the skill
+  for the chosen agent, install spec-kit's `specify` CLI via
+  `uv tool install`, run `specify init` in a target repo, and record the
+  setup in `~/.config/herdr-factory/config.toml`. Non-interactive mode:
+  `--orchestrator <x> --repo <path> --yes`.
+  - Detects spec-kit's `--integration` vs legacy `--ai` flag.
+  - Hermes is wired via spec-kit's generic integration
+    (`--integration generic --integration-options="--commands-dir
+    .hermes/commands/"`); Claude via the native claude integration.
+- **Section 11: SDD factory loop — spec-kit × herdr**
+  - 11.0 Onboarding and orchestrator/integration mapping.
+  - 11.1 Stage-by-stage loop table (constitution → specify → clarify →
+    plan → tasks → implement → analyze → converge → compound) with the
+    gate each stage must pass.
+  - 11.2 Dispatch `tasks.md` to the herd — `[P]` tasks become parallel
+    workers in their own worktrees; `tasks.md` replaces the ad-hoc
+    `/tmp/herd-plan.md`; workers never edit `tasks.md`; `/speckit.analyze`
+    runs before the §9.5 review wave; converge verifies against
+    `spec.md` acceptance criteria.
+  - 11.3 SDD gates: no spec → no herd; `tasks.md` is the only source of
+    slices; `[NEEDS CLARIFICATION]` blocks planning; CRITICAL analyze
+    findings block the merge; compound grades `[P]` prediction quality.
+  - 11.4 When NOT to SDD.
+- Quick reference table — rows for onboarding, the SDD loop, and
+  orchestrator lookup.
+- Frontmatter description — SDD/spec-kit/factory-loop trigger conditions.
+- README — onboarding section, repo-layout and workflow-table updates.
+
 ## [1.2.0] - 2026-06-11
 
 Compound-engineering pass, inspired by
@@ -72,6 +107,7 @@ its own deliverable.
 - This repo: README, CHANGELOG, LICENSE (MIT), CONTRIBUTING, install
   script, lint script.
 
+[1.3.0]: #130---2026-06-11
 [1.2.0]: #120---2026-06-11
 [1.1.0]: #110---2026-06-11
 [1.0.0]: #100---2026-06-11
