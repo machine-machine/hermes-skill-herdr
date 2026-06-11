@@ -1,0 +1,337 @@
+---
+name: herdr
+version: 1.1.0
+description: Orchestrate a fleet of AI coding agents through herdr — the terminal workspace manager (workspaces → tabs → panes) running on this machine. Spawn agents, dispatch work, watch lifecycle state (idle/working/blocked), unblock approval prompts, fan out and converge multi-agent work, and manage agent integrations. Trigger when the user mentions herdr, "the fleet", "orchestrate agents", "spawn an agent", "what are my agents doing", panes/workspaces/worktrees, herdr integrations, or wants an agent to drive other coding agents (claude/codex/cursor/opencode/etc.) running in herdr. ALSO trigger when an intent arrives over a chat channel (Mattermost, Discord, Slack, etc.) and the right response is to spin up a parallel herdr "herd" of codex (or mixed) workers to achieve the goal — understand the intent first, then fan out concurrent workers, converge results, and report back on the same channel.
+---
+
+# herdr Skill
+
+Drive herdr — a terminal workspace manager purpose-built to run **more than one coding agent at a time**. herdr is a local CLI + headless server talking over a Unix-domain socket. You orchestrate the fleet through the `herdr` CLI (which wraps the socket API) or by speaking JSON to the socket directly.
+
+> **You are inside herdr right now.** This Claude session is itself a herdr-managed agent in a pane. Read [Know thyself](#know-thyself-critical) before sending keys or closing anything.
+
+## This install (verified)
+
+| Property | Value |
+|----------|-------|
+| Binary | `/Users/p0l4k/.local/bin/herdr` (on PATH as `herdr`) |
+| Version | `0.6.9` (protocol 13) |
+| Server | running — `herdr status` to confirm |
+| Socket | `~/.config/herdr/herdr.sock` (default session) |
+| Config | `~/.config/herdr/config.toml` |
+| Logs | `~/.config/herdr/{herdr,herdr-client,herdr-server}.log` |
+| Integrations installed | `claude`, `codex`, `opencode`, `kilo`, `hermes`, `cursor` |
+| Integrations available, not installed | `pi`, `omp`, `copilot`, `droid`, `kimi`, `qodercli` |
+
+CLI socket-query subcommands (`agent list`, `pane list`, `pane get`, …) print the **raw JSON socket response** to stdout — pipe through `jq`. Always run non-interactive subcommands; **never** run bare `herdr` (it launches/attaches the TUI and will hang a non-interactive shell).
+
+## The model
+
+```
+workspace ──┬── tab ──┬── pane ── (terminal, optionally hosting an agent)
+            │         └── pane ── agent: claude, codex, …
+            └── tab …
+```
+
+- **pane** — a terminal. May host an **agent**. Identified by `pane_id` like `w653edbb5f35571-1`. Also addressable by `terminal_id` (`term_…`).
+- **agent** — a detected/reported coding agent in a pane. Has:
+  - **lifecycle state**: `idle` | `working` | `blocked` | `done` | `unknown`. From installed **integration hooks** (authoritative) or screen-manifest detection (heuristic).
+  - **session identity**: `agent_session.value` (e.g. a Claude session UUID) used for native **restore** after restart.
+- `blocked` = the agent is waiting on a human (approval / permission / question prompt). This is your cue to intervene.
+
+`herdr <thing> --help` prints exact syntax for any command group. Full flag/method reference: [reference.md](reference.md).
+
+---
+
+## Core orchestration workflows
+
+### 1. Discover the fleet
+```bash
+herdr status                                  # server up? version?
+herdr agent list | jq '.result.agents'        # every agent: state, cwd, pane_id, session
+herdr pane list  | jq '.result.panes'          # every pane (incl. agent-less terminals)
+herdr workspace list ; herdr tab list          # topology
+```
+Quick human-readable roll-up:
+```bash
+herdr agent list | jq -r '.result.agents[] | "\(.agent_status)\t\(.agent)\t\(.cwd)\t\(.pane_id)"'
+```
+
+### 2. Know thyself (CRITICAL)
+Before any `send-*`, `run`, `close`, or `server stop`, identify the orchestrator's own pane and exclude it:
+```bash
+SELF=$(herdr agent list | jq -r '.result.agents[] | select(.focused==true) | .pane_id')
+# (or match .agent_session.value against this session's UUID)
+```
+Never `send-keys`, `send-text`, `pane close`, or `agent attach --takeover` your **own** `$SELF` pane — you will corrupt your own input or kill the session. Treat `$SELF` as read-only.
+
+### 3. Spawn an agent
+```bash
+# Start a named agent; everything after `--` is the agent's argv.
+herdr agent start claude --cwd /path/to/repo --split right --no-focus -- --dangerously-skip-permissions
+herdr agent start codex  --workspace <ws_id> --tab <tab_id> -- ...
+```
+For **isolated parallel work**, give each agent its own git worktree first:
+```bash
+herdr worktree create --cwd /repo --branch feature/x --base main --label "feat-x" --json
+herdr agent start claude --cwd ~/.herdr/worktrees/<repo>/feature-x --no-focus -- ...
+```
+`agent start` returns the new pane/agent identifiers in its JSON result — capture them.
+
+### 4. Dispatch work to an agent
+`agent send` writes **literal text** (no submit). To submit a prompt to a TUI agent, send the text then an Enter:
+```bash
+herdr agent send <target> "Refactor the auth module. Report back when done."
+herdr pane send-keys <pane_id> Enter
+```
+For a shell pane, `pane run` types the command **and** presses Enter in one step:
+```bash
+herdr pane run <pane_id> "pytest -q"
+```
+`<target>` accepts terminal ids, unique agent names, detected labels, or pane ids.
+
+### 5. Monitor & wait
+Block until an agent changes state (the backbone of orchestration):
+```bash
+herdr agent wait <target> --status idle    --timeout 600000   # ms; wait for it to finish
+herdr agent wait <target> --status blocked --timeout 600000   # wait until it needs you
+herdr wait output <pane_id> --match "BUILD OK" --regex --timeout 120000
+```
+Read what an agent produced:
+```bash
+herdr agent read <target> --source recent --lines 80           # recent scrollback
+herdr pane  read <pane_id> --source recent-unwrapped --lines 200
+herdr pane  read <pane_id> --source visible                    # just the visible screen
+```
+
+### 6. Unblock a stuck agent
+When state is `blocked`, read the prompt, decide, and answer:
+```bash
+herdr agent read <target> --source visible              # see the approval/question
+herdr pane send-keys <pane_id> Enter                    # accept default
+# or choose an option / type an answer:
+herdr pane send-text <pane_id> "2" ; herdr pane send-keys <pane_id> Enter
+```
+Approve only what the user authorized. Surface destructive prompts (deletes, force-push, secrets) to the user instead of auto-approving.
+
+### 7. Fan-out → converge loop
+The canonical multi-agent pattern, in bash:
+```bash
+# fan out: one agent per task, each in its own worktree, none focused
+for t in task_a task_b task_c; do
+  herdr worktree create --cwd /repo --branch wip/$t --base main --json
+  PANE=$(herdr agent start claude --cwd ~/.herdr/worktrees/repo/wip-$t --no-focus -- \
+           --dangerously-skip-permissions | jq -r '.result.pane_id')
+  herdr agent send $PANE "$(cat tasks/$t.md)"; herdr pane send-keys $PANE Enter
+  echo "$t=$PANE" >> /tmp/fleet.map
+done
+# converge: poll each to idle, then collect
+while read kv; do t=${kv%=*}; p=${kv#*=}
+  herdr agent wait $p --status idle --timeout 1800000
+  herdr pane read $p --source recent-unwrapped --lines 300 > /tmp/$t.out
+done < /tmp/fleet.map
+```
+For tighter loops, subscribe to events over the socket instead of polling — see §Socket below.
+
+### 8. Notify the human
+```bash
+herdr notification show "fleet idle" --body "3/3 tasks done" --position top-right --sound done
+```
+
+### 9. Channel-driven intent → spin up a herdr "herd"
+**Use when:** an intent arrives over a chat channel (Mattermost, Discord, Slack, etc.) and the work is decomposable into **independent sub-tasks** that benefit from running in parallel. The user is *not* at the keyboard — they're waiting for a deliverable on the channel.
+
+If the work is a single small fix, just do it inline — do not fan out. Fan out only when the goal has ≥2 truly independent slices (different files / services / concerns) or when the user explicitly asks for parallel workers.
+
+#### 9.1 Understand the intent (do this FIRST, before any spawning)
+1. Re-read the message end-to-end. Channel messages are often terse, use shorthand, or assume context from a thread.
+2. Identify the **deliverable**: what does "done" look like? What repo? What branch / base? Are there constraints (must not touch X, must use Y, deadline)?
+3. If any of those are ambiguous, **ask one focused clarifying question on the channel** *before* spawning. Do not spawn into ambiguity.
+4. Decompose into parallel slices. Good splits:
+   - **By file/module**: "refactor auth/, refactor api/, write tests" → 3 workers
+   - **By service**: "frontend changes, backend changes, infra changes" → 3 workers
+   - **By concern**: "implement, test, document" → 3 workers
+   - **By independent feature branch** (when the user asks for several features at once)
+   Bad splits: anything that touches the same files, anything that needs a prior slice to exist (do that serially first).
+5. Decide the **base ref** for worktrees (usually `main`; or whatever the user / repo state implies).
+6. Decide the **worker agent type**. Default to `codex` (good at long-running, focused coding tasks, and it's installed in this fleet). Mix in `claude` for tasks needing broader context or `cursor` for IDE-style work — only when there's a clear reason.
+
+#### 9.2 Spawn the herd (one worktree per worker, all in parallel)
+```bash
+# Identify self BEFORE spawning — see §2
+SELF=$(herdr agent list | jq -r '.result.agents[] | select(.focused==true) | .pane_id')
+
+REPO=/path/to/repo
+BASE=main
+INTENT="<the user's goal, restated concretely>"  # e.g. "add OAuth login + rate limiting + audit log"
+SPLITS=("oauth" "rate-limit" "audit-log")        # N=3 workers
+: > /tmp/herd.map                                # task -> pane_id
+
+for t in "${SPLITS[@]}"; do
+  # 1. isolated worktree per worker
+  herdr worktree create --cwd "$REPO" --branch "wip/$INTENT/$t" --base "$BASE" --label "$t" --json \
+    | jq -r '.result.worktree.path' > /tmp/wt-$t
+
+  WT=$(cat /tmp/wt-$t)
+  # 2. spawn codex worker, do NOT take focus
+  PANE=$(herdr agent start codex --cwd "$WT" --split right --no-focus -- \
+           --dangerously-skip-permissions \
+    | jq -r '.result.pane_id')
+  # 3. author a tight, scoped prompt per worker (one slice only)
+  cat > /tmp/prompt-$t.md <<EOF
+Scope: $t only. Do NOT touch files outside $t's slice.
+Repo: $WT  (worktree, branch wip/$INTENT/$t, base $BASE)
+Goal: <concrete deliverable for $t from the original intent>
+Constraints: <any from the channel, e.g. "do not modify existing tests">
+When done: commit on the current branch with a clear message and report back.
+EOF
+  herdr agent send "$PANE" "$(cat /tmp/prompt-$t.md)"
+  herdr pane send-keys "$PANE" Enter
+
+  echo "$t=$PANE=$WT" >> /tmp/herd.map
+done
+```
+Key rules:
+- `--no-focus` on **every** worker so you keep the channel-readable pane focused.
+- One worktree per worker, branched off the agreed base — workers cannot clobber each other.
+- Each prompt is **one slice only**. No "while you're at it…" prompts.
+- Write the deliverable definition into the prompt so the worker doesn't have to guess.
+
+#### 9.3 Monitor the herd (event-driven, not polling)
+Subscribe to state changes once at the start; react as events arrive:
+```bash
+# Open a persistent socket; for one-shot polling, see the loop below
+socat - UNIX-CONNECT:~/.config/herdr/herdr.sock > /tmp/herd.events <<EOF
+{"id":"sub","method":"events.subscribe","params":{"subscriptions":[
+  {"type":"pane.agent_status_changed","agent_status":"blocked"},
+  {"type":"pane.agent_status_changed","agent_status":"idle"}
+]}}
+EOF
+```
+Or poll per-worker (simpler, fine for ≤10 workers):
+```bash
+while read line; do
+  t=${line%%=*}; rest=${line#*=}; p=${rest%%=*}; wt=${rest#*=}
+  echo ">> $t: waiting…"
+  if ! herdr agent wait "$p" --status idle --timeout 1800000; then
+    echo "!! $t: timed out / errored"; continue
+  fi
+  if [ "$(herdr agent get "$p" | jq -r '.result.pane.agent_status')" = "blocked" ]; then
+    # Worker needs approval — see §6, then re-wait
+    herdr agent read "$p" --source visible
+    # decide: auto-approve (safe) vs escalate to channel (destructive)
+  fi
+  herdr agent read "$p" --source recent --lines 200 > /tmp/herd-$t.out
+  echo ">> $t: done"
+done < /tmp/herd.map
+```
+
+#### 9.4 Unblock workers (channel-aware approval)
+When a worker goes `blocked` on a permission/approval prompt:
+- **Auto-approve** routine stuff (running tests, reading files, installing packages in the worktree).
+- **Escalate to the channel** for anything destructive (force-push, deleting branches, writing to main, touching secrets, network exfiltration). Post the prompt verbatim and the worker's branch, then wait for the user's reply.
+- Never `pane send-keys $SELF` — your own pane is off-limits (§2).
+- After approving, the worker resumes; `agent wait` will continue or you can re-issue it.
+
+#### 9.5 Converge
+Once all workers are `idle`/`done`:
+1. Collect each worker's branch from `/tmp/herd.map`.
+2. Merge serially into a single integration branch (or open N PRs — let the user pick on the channel):
+   ```bash
+   INT_BRANCH="herd/$INTENT"
+   git -C "$REPO" switch -c "$INT_BRANCH" "$BASE"
+   for t in "${SPLITS[@]}"; do
+     wt=$(grep "^$t=" /tmp/herd.map | cut -d= -f3)
+     git -C "$REPO" merge --no-ff "wip/$INTENT/$t" -m "merge: $t"
+   done
+   git -C "$REPO" push -u origin "$INT_BRANCH"
+   ```
+3. Run the project's test/lint suite on the integration branch.
+4. Post a single summary on the channel: each slice's status, branch names, test result, and a one-line "what changed" per slice.
+5. Leave the worktrees and panes in place unless the user asks to tear down. To tear down:
+   ```bash
+   while read line; do
+     t=${line%%=*}; rest=${line#*=}; p=${rest%%=*}; wt=${rest#*=}
+     herdr pane close "$p"          # closes the pane; worker dies
+     herdr worktree remove --workspace <ws_id> --force
+     git -C "$REPO" worktree remove "$wt" --force
+     git -C "$REPO" branch -D "wip/$INTENT/$t"
+   done < /tmp/herd.map
+   ```
+
+#### 9.6 Channel-style checklist (paste into the channel after launch)
+```
+:herd: started: <INTENT>
+workers: <N> (all codex, parallel)
+base:   <branch>
+branches: wip/<INTENT>/<t1>, wip/<INTENT>/<t2>, …
+I'll post when each slice finishes or needs approval.
+```
+
+#### 9.7 When NOT to herd
+- Single small change → just do it.
+- Slices share files → sequence them, don't parallelize.
+- User is iterating live with you → stay inline, don't spawn.
+- You're not sure what the user wants → ask, don't spawn.
+
+---
+
+## Integrations
+
+Installing an integration drops a lifecycle hook into that agent's config dir so herdr gets **authoritative** state (and session identity for restore) instead of guessing from the screen.
+```bash
+herdr integration status [--outdated-only]      # what's installed / outdated
+herdr integration install droid                 # add a hook
+herdr integration uninstall droid
+```
+Agents: `pi omp claude codex copilot droid kimi opencode kilo hermes qodercli cursor`. After upstream herdr updates, re-run `integration status` and reinstall any `outdated`.
+
+## Socket API (direct, for events & scripting)
+
+Newline-delimited JSON over `~/.config/herdr/herdr.sock`. Request `{"id","method","params"}` → `{"id","result"}` or `{"id","error"}`.
+```bash
+printf '%s\n' '{"id":"1","method":"ping","params":{}}' | nc -U ~/.config/herdr/herdr.sock
+```
+Most useful for **event-driven** orchestration (react the instant an agent blocks) rather than polling:
+```json
+{"id":"sub","method":"events.subscribe","params":{"subscriptions":[{"type":"pane.agent_status_changed","agent_status":"blocked"}]}}
+```
+Methods mirror the CLI: `agent.*`, `pane.*` (incl. `pane.report_agent`, `pane.wait_for_output`), `workspace.*`, `tab.*`, `worktree.*`, `events.subscribe`/`events.wait`, `notification.show`. Full list + payload shapes: [reference.md](reference.md).
+
+## Reporting custom agents
+
+To make a process herdr doesn't natively detect show up with managed lifecycle state, report it yourself (use a unique `--source`):
+```bash
+herdr pane report-agent <pane_id> --source custom:mytool --agent mytool --state working --message "indexing"
+herdr pane report-agent <pane_id> --source custom:mytool --agent mytool --state idle
+herdr pane release-agent <pane_id> --source custom:mytool --agent mytool   # relinquish authority
+```
+
+## Gotchas & safety
+
+- **Never run bare `herdr`** non-interactively (TUI attach → hang). Use subcommands.
+- **Protect `$SELF`** — see §2. Don't send keys to, attach-takeover, or close your own pane; don't `herdr server stop` while orchestrating from inside.
+- **Timeouts are milliseconds** (`--timeout 600000` = 10 min). macOS has no `timeout(1)`; rely on herdr's own `wait`/`--timeout` flags, or `gtimeout` if coreutils is installed.
+- **`send` ≠ submit** — `agent send`/`pane send-text` write literal text; you must send `Enter` separately. `pane run` includes Enter.
+- **`blocked` is strict** — herdr only flags `blocked` on a recognized approval/question/permission UI; an agent stuck for other reasons may read as `working`. Cross-check with `pane read --source visible`.
+- **Heuristic vs authoritative** — agents without an installed integration are detected from the screen and can misreport. Prefer installing the integration for any agent you orchestrate heavily.
+- **Worktree isolation** prevents parallel agents from clobbering each other's working tree; default root `~/.herdr/worktrees/<repo>/<branch-slug>`.
+- Use a stable, namespaced `--source` (e.g. `orchestrator:<task>`) whenever you report agent/metadata, so you can later `release-agent` cleanly.
+
+## Quick reference
+
+| Goal | Command |
+|------|---------|
+| Fleet state | `herdr agent list \| jq '.result.agents'` |
+| Spawn | `herdr agent start <name> --cwd P --no-focus -- <argv>` |
+| Dispatch | `herdr agent send <t> "…"` then `herdr pane send-keys <p> Enter` |
+| Wait done | `herdr agent wait <t> --status idle --timeout MS` |
+| Wait needs-me | `herdr agent wait <t> --status blocked --timeout MS` |
+| Read output | `herdr agent read <t> --source recent --lines N` |
+| Unblock | read visible → `herdr pane send-keys <p> Enter` |
+| Worktree | `herdr worktree create --cwd P --branch B --base main` |
+| Notify | `herdr notification show "T" --body "B" --sound done` |
+| Integrations | `herdr integration status` |
+| Channel intent → herd | re-read intent → clarify if needed → `worktree create` per slice → `agent start codex --no-focus` per slice → subscribe/pol `agent_status_changed` → unblock → converge → post summary on channel |
+
+Full CLI + socket reference: [reference.md](reference.md).
