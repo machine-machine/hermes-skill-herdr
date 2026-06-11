@@ -67,9 +67,12 @@ Never `send-keys`, `send-text`, `pane close`, or `agent attach --takeover` your 
 
 ### 3. Spawn an agent
 ```bash
-# Start a named agent; everything after `--` is the agent's argv.
-herdr agent start claude --cwd /path/to/repo --split right --no-focus -- --dangerously-skip-permissions
-herdr agent start codex  --workspace <ws_id> --tab <tab_id> -- ...
+# Start a named agent; everything after `--` is the agent's FULL argv —
+# argv[0] MUST be the binary (full path is safest). Flags alone fail with
+# "No viable candidates found in PATH".
+herdr agent start claude --cwd /path/to/repo --split right --no-focus -- \
+  "$(command -v claude)" --dangerously-skip-permissions
+herdr agent start codex  --workspace <ws_id> --tab <tab_id> -- "$(command -v codex)" ...
 ```
 For **isolated parallel work**, give each agent its own git worktree first:
 ```bash
@@ -89,6 +92,22 @@ For a shell pane, `pane run` types the command **and** presses Enter in one step
 herdr pane run <pane_id> "pytest -q"
 ```
 `<target>` accepts terminal ids, unique agent names, detected labels, or pane ids.
+
+**Long prompts and reliable answers — use the file protocol.** Never stream a multi-line prompt into a TUI input (newlines can submit early), and never scrape a TUI screen for a deliverable (wrapped, truncated, full of chrome). Instead:
+```bash
+# 1. Prompt → file; dispatch a one-line pointer
+cat > /tmp/task-$ID.md <<EOF
+<full task here>
+Output protocol: write your COMPLETE answer to /tmp/answer-$ID.md,
+then output this exact line in the terminal: TASK_DONE_$ID
+EOF
+herdr agent send "$PANE" "Read /tmp/task-$ID.md and follow its instructions exactly."
+herdr pane send-keys "$PANE" Enter
+# 2. Wait on the sentinel; the FILE is the deliverable, not the screen
+herdr wait output "$PANE" --match "TASK_DONE_$ID" --timeout 600000
+cat /tmp/answer-$ID.md
+```
+Use `pane read` for *monitoring* (what is the agent doing?), the file protocol for *deliverables* (what did it produce?).
 
 ### 5. Monitor & wait
 Block until an agent changes state (the backbone of orchestration):
@@ -121,7 +140,7 @@ The canonical multi-agent pattern, in bash:
 for t in task_a task_b task_c; do
   herdr worktree create --cwd /repo --branch wip/$t --base main --json
   PANE=$(herdr agent start claude --cwd ~/.herdr/worktrees/repo/wip-$t --no-focus -- \
-           --dangerously-skip-permissions | jq -r '.result.pane_id')
+           "$(command -v claude)" --dangerously-skip-permissions | jq -r '.result.agent.pane_id')
   herdr agent send $PANE "$(cat tasks/$t.md)"; herdr pane send-keys $PANE Enter
   echo "$t=$PANE" >> /tmp/fleet.map
 done
@@ -177,8 +196,8 @@ for t in "${SPLITS[@]}"; do
   WT=$(cat /tmp/wt-$t)
   # 2. spawn codex worker, do NOT take focus
   PANE=$(herdr agent start codex --cwd "$WT" --split right --no-focus -- \
-           --dangerously-skip-permissions \
-    | jq -r '.result.pane_id')
+           "$(command -v codex)" --dangerously-skip-permissions \
+    | jq -r '.result.agent.pane_id')
   # 3. author a tight, scoped prompt per worker (one slice only)
   cat > /tmp/prompt-$t.md <<EOF
 Scope: $t only. Do NOT touch files outside $t's slice.
@@ -252,8 +271,9 @@ Once all workers are `idle`/`done`:
 4. **Review before you report.** Don't hand the user an unreviewed merge — spawn reviewer agents on the integration branch, in parallel, one lens each (correctness, security if the diff touches auth/input/secrets, project conventions):
    ```bash
    for lens in correctness conventions; do
-     PANE=$(herdr agent start claude --cwd "$REPO" --no-focus -- --dangerously-skip-permissions \
-       | jq -r '.result.pane_id')
+     PANE=$(herdr agent start claude --cwd "$REPO" --no-focus -- \
+              "$(command -v claude)" --dangerously-skip-permissions \
+       | jq -r '.result.agent.pane_id')
      herdr agent send "$PANE" "Review the diff between $BASE and $INT_BRANCH for $lens issues only. Severity-tag each finding P1 (must fix) / P2 (should fix) / P3 (nit). Output findings as a list, nothing else."
      herdr pane send-keys "$PANE" Enter
      echo "review-$lens=$PANE" >> /tmp/herd.map
@@ -378,8 +398,9 @@ while IFS= read -r task; do
   herdr worktree create --cwd "$REPO" --branch "wip/$FEATURE/$TID" --base "$BASE" --label "$TID" --json \
     | jq -r '.result.worktree.path' > /tmp/wt-$TID
   WT=$(cat /tmp/wt-$TID)
-  PANE=$(herdr agent start codex --cwd "$WT" --no-focus -- --dangerously-skip-permissions \
-    | jq -r '.result.pane_id')
+  PANE=$(herdr agent start codex --cwd "$WT" --no-focus -- \
+           "$(command -v codex)" --dangerously-skip-permissions \
+    | jq -r '.result.agent.pane_id')
   cat > /tmp/prompt-$TID.md <<EOF
 You are one worker in an SDD herd. Read these FIRST, in order:
   1. .specify/memory/constitution.md   (project principles — binding)
@@ -451,6 +472,9 @@ herdr pane release-agent <pane_id> --source custom:mytool --agent mytool   # rel
 ## Gotchas & safety
 
 - **Never run bare `herdr`** non-interactively (TUI attach → hang). Use subcommands.
+- **`agent start` argv[0] must be the binary** — `-- --some-flag` fails with "No viable candidates found in PATH". Always `-- "$(command -v claude)" --flags…`. The agent *name* (`claude`) only selects the integration/label, not the binary.
+- **`agent start` result shape** — the pane id is at `.result.agent.pane_id` (not `.result.pane_id`).
+- **First run in a new cwd may block on the folder-trust prompt** ("Do you trust the files in this folder?"). Watch for early `blocked`, read the visible screen, send Enter to accept — it's safe for worktrees you just created.
 - **Protect `$SELF`** — see §2. Don't send keys to, attach-takeover, or close your own pane; don't `herdr server stop` while orchestrating from inside.
 - **Timeouts are milliseconds** (`--timeout 600000` = 10 min). macOS has no `timeout(1)`; rely on herdr's own `wait`/`--timeout` flags, or `gtimeout` if coreutils is installed.
 - **`send` ≠ submit** — `agent send`/`pane send-text` write literal text; you must send `Enter` separately. `pane run` includes Enter.
@@ -464,8 +488,9 @@ herdr pane release-agent <pane_id> --source custom:mytool --agent mytool   # rel
 | Goal | Command |
 |------|---------|
 | Fleet state | `herdr agent list \| jq '.result.agents'` |
-| Spawn | `herdr agent start <name> --cwd P --no-focus -- <argv>` |
+| Spawn | `herdr agent start <name> --cwd P --no-focus -- "$(command -v <bin>)" <flags>` |
 | Dispatch | `herdr agent send <t> "…"` then `herdr pane send-keys <p> Enter` |
+| Deliverables | file protocol: prompt file → one-line pointer → `wait output --match <sentinel>` → read answer file (§4) |
 | Wait done | `herdr agent wait <t> --status idle --timeout MS` |
 | Wait needs-me | `herdr agent wait <t> --status blocked --timeout MS` |
 | Read output | `herdr agent read <t> --source recent --lines N` |

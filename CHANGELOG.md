@@ -38,6 +38,24 @@ The factory loop becomes spec-driven: spec-kit in front, herdr behind.
   orchestrator lookup.
 - Frontmatter description — SDD/spec-kit/factory-loop trigger conditions.
 - README — onboarding section, repo-layout and workflow-table updates.
+- **§4 file protocol** for long prompts and reliable deliverables: prompt
+  file → one-line pointer → `wait output --match <sentinel>` → read the
+  answer file. `pane read` is for monitoring, the file protocol is for
+  deliverables. (Lesson promoted from the ask-fable skill dry runs, per
+  §10.3.)
+- Gotchas: `agent start` argv[0] must be the binary; result shape is
+  `.result.agent.pane_id`; first run in a new cwd can block on the
+  folder-trust prompt.
+
+### Fixed
+- **All `agent start` examples were broken** — they passed flags alone
+  after `--` (e.g. `-- --dangerously-skip-permissions`), which fails with
+  "No viable candidates found in PATH". herdr requires the binary as
+  argv[0]: `-- "$(command -v claude)" --dangerously-skip-permissions`.
+  Verified against herdr 0.6.9 on 2026-06-11. Affected §3, §7, §9.2,
+  §9.5, §11.2, and the quick-reference spawn row.
+- Pane-id extraction in examples corrected from `.result.pane_id` to
+  `.result.agent.pane_id`.
 
 ## [1.2.0] - 2026-06-11
 
